@@ -13,10 +13,13 @@ import {
   ShieldCheck,
   Search,
   Check,
-  Sparkles
+  Sparkles,
+  Camera,
+  Maximize2
 } from 'lucide-react';
 import HardwareSourceBadge from '../components/HardwareSourceBadge';
 import { classifyRecord, classifyEntry, classifyExit } from '../services/classificationEngine';
+import { playScanSuccess, playLateWarning, playErrorBuzz } from '../services/soundEffects';
 
 export default function GateStaffView({
   allStudents,
@@ -33,6 +36,7 @@ export default function GateStaffView({
   const [earlyExitReason, setEarlyExitReason] = useState('Approved On-Duty / Medical Permit');
   const [simulatedTime, setSimulatedTime] = useState('08:42'); // Allows testing morning or evening recording easily
   const [timeMode, setTimeMode] = useState('morning'); // 'morning' (08:42 AM) | 'evening' (17:21 PM)
+  const [isCameraActive, setIsCameraActive] = useState(false);
 
   const inputRef = useRef(null);
   const todayDate = '2026-10-05';
@@ -71,13 +75,15 @@ export default function GateStaffView({
 
     if (match) {
       setSelectedStudent(match);
-      setFeedbackMessage({ type: 'info', text: `Student found: ${match.name} (${match.regNo})` });
+      playScanSuccess();
+      setFeedbackMessage({ type: 'info', text: `Student verified: ${match.name} (${match.regNo})` });
     }
   };
 
   const handleSelectQuickStudent = (student) => {
     setSelectedStudent(student);
     setStudentInput(student.regNo);
+    playScanSuccess();
     setFeedbackMessage(null);
   };
 
@@ -85,6 +91,7 @@ export default function GateStaffView({
   const handleRecordEntry = () => {
     if (!selectedStudent) return;
     if (todayRecord && todayRecord.entryTime) {
+      playErrorBuzz();
       setFeedbackMessage({
         type: 'warning',
         text: `Duplicate blocked: Entry already recorded for ${selectedStudent.name} at ${todayRecord.entryTime} AM.`
@@ -93,6 +100,12 @@ export default function GateStaffView({
     }
 
     const entryTime = timeMode === 'morning' ? simulatedTime : '08:42';
+    if (entryTime > rules.lateAfterTime) {
+      playLateWarning();
+    } else {
+      playScanSuccess();
+    }
+
     onRecordEntry(selectedStudent.id, entryTime, hardwareSource);
     setFeedbackMessage({
       type: 'success',
@@ -104,6 +117,7 @@ export default function GateStaffView({
   const handleRecordExit = () => {
     if (!selectedStudent) return;
     if (todayRecord && todayRecord.exitTime) {
+      playErrorBuzz();
       setFeedbackMessage({
         type: 'warning',
         text: `Duplicate blocked: Exit already recorded for ${selectedStudent.name} at ${todayRecord.exitTime} PM.`
@@ -112,11 +126,25 @@ export default function GateStaffView({
     }
 
     const exitTime = timeMode === 'evening' ? simulatedTime : '17:21';
+    playScanSuccess();
     onRecordExit(selectedStudent.id, exitTime, hardwareSource, earlyExitReason);
     setFeedbackMessage({
       type: 'success',
       text: `✓ Evening Exit Recorded: ${selectedStudent.name} at ${exitTime} PM via ${hardwareSource}`
     });
+  };
+
+  const handleSimulateCameraScan = () => {
+    setIsCameraActive(true);
+    setTimeout(() => {
+      // Pick random student and simulate QR decode
+      const random = allStudents[Math.floor(Math.random() * allStudents.length)];
+      setSelectedStudent(random);
+      setStudentInput(random.regNo);
+      playScanSuccess();
+      setIsCameraActive(false);
+      setFeedbackMessage({ type: 'success', text: `QR Code Decoded from Optical Camera: ${random.name} (${random.regNo})` });
+    }, 1800);
   };
 
   return (
@@ -166,14 +194,14 @@ export default function GateStaffView({
         <div>
           {/* Big Input Hero (Section 15) */}
           <div className="scanner-hero">
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <div style={{ fontSize: '0.8rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#93c5fd' }}>
-                SCAN / ENTER STUDENT ID
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
+              <div style={{ fontSize: '0.8rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#93c5fd', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <ScanLine size={16} /> SCAN / ENTER STUDENT ID
               </div>
 
               {/* Time Simulator switch to test 08:42 AM or 05:21 PM */}
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.76rem' }}>
-                <span style={{ color: 'var(--text-muted)' }}>Simulated Scan Time:</span>
+                <span style={{ color: 'var(--text-muted)' }}>Scan Time:</span>
                 <input
                   type="time"
                   className="filter-input mono"
@@ -225,7 +253,46 @@ export default function GateStaffView({
               >
                 <ScanLine size={20} /> Process Tap
               </button>
+
+              <button
+                className="btn btn-secondary btn-lg"
+                onClick={handleSimulateCameraScan}
+                title="Open Camera QR Optical Scanner Simulation"
+                style={{ padding: '0 16px' }}
+              >
+                <Camera size={20} style={{ color: '#38bdf8' }} />
+              </button>
             </div>
+
+            {/* Camera Viewfinder Simulation (when camera button clicked) */}
+            {isCameraActive && (
+              <div style={{
+                position: 'relative',
+                marginTop: '16px',
+                height: '140px',
+                background: '#040711',
+                borderRadius: 'var(--radius-lg)',
+                border: '2px dashed #0ea5e9',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                overflow: 'hidden'
+              }}>
+                <div style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  height: '3px',
+                  background: '#38bdf8',
+                  boxShadow: '0 0 12px #38bdf8',
+                  animation: 'laserScan 1.2s ease-in-out infinite alternate'
+                }} />
+                <div style={{ color: '#38bdf8', fontSize: '0.85rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <Camera size={18} /> Scanning Optical Barcode / Digital ID QR Code...
+                </div>
+              </div>
+            )}
 
             {/* Quick Demonstration Chips */}
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '14px', flexWrap: 'wrap' }}>

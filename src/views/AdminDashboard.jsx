@@ -12,11 +12,14 @@ import {
   Filter,
   Eye,
   RefreshCw,
-  Sparkles
+  Sparkles,
+  ArrowUpDown,
+  Search
 } from 'lucide-react';
 import KpiCard from '../components/KpiCard';
 import ArrivalDistributionChart from '../components/ArrivalDistributionChart';
 import DepartmentComparisonChart from '../components/DepartmentComparisonChart';
+import LiveSimulationBar from '../components/LiveSimulationBar';
 import HardwareSourceBadge from '../components/HardwareSourceBadge';
 import { 
   calculateTodayKPIs, 
@@ -25,7 +28,7 @@ import {
   calculateDepartmentAnalytics,
   filterRecords 
 } from '../services/analyticsEngine';
-import { classifyRecord } from '../services/classificationEngine';
+import { classifyRecord, timeToMinutes } from '../services/classificationEngine';
 
 export default function AdminDashboard({
   allStudents,
@@ -33,12 +36,20 @@ export default function AdminDashboard({
   rules,
   onOpenStudentProfile,
   onOpenMissingExits,
-  onNavigateToView
+  onNavigateToView,
+  isSimulating,
+  onToggleSimulation,
+  onSimulateSingleTap,
+  lastSimulatedStudentId
 }) {
   const [leaderboardFilter, setLeaderboardFilter] = useState('this_week'); // 'today' | 'this_week' | 'this_month'
   const [selectedDept, setSelectedDept] = useState('ALL');
+  const [selectedSlot, setSelectedSlot] = useState(null); // Filter by 15-min arrival slot
+  const [sortField, setSortField] = useState('entryTime');
+  const [sortDirection, setSortDirection] = useState('desc');
+  const [searchTableQuery, setSearchTableQuery] = useState('');
 
-  // Today's KPIs
+  // Today's KPIs dynamically calculated
   const kpis = useMemo(() => {
     return calculateTodayKPIs(allStudents, allRecords, rules);
   }, [allStudents, allRecords, rules]);
@@ -63,21 +74,71 @@ export default function AdminDashboard({
     return calculateDepartmentAnalytics(allStudents, allRecords, rules);
   }, [allStudents, allRecords, rules]);
 
-  // Today's recent student movement stream (last 12 entries/exits)
-  const recentMovements = useMemo(() => {
-    const todayRecords = allRecords
+  // Slot bounds helper
+  const isTimeInSlot = (timeStr, slotStr) => {
+    if (!timeStr || !slotStr) return true;
+    const min = timeToMinutes(timeStr);
+    if (slotStr === '< 08:00') return min < 480;
+    if (slotStr === '08:00 - 08:15') return min >= 480 && min < 495;
+    if (slotStr === '08:15 - 08:30') return min >= 495 && min < 510;
+    if (slotStr === '08:30 - 08:45') return min >= 510 && min < 525;
+    if (slotStr === '08:45 - 09:00') return min >= 525 && min < 540;
+    if (slotStr === '> 09:00') return min >= 540;
+    return true;
+  };
+
+  // Today's recent student movement stream with sorting and slot filter
+  const processedMovements = useMemo(() => {
+    let todayRecords = allRecords
       .filter(r => r.date === '2026-10-05')
       .map(rec => ({
         ...rec,
         classification: classifyRecord(rec, rules, true)
-      }))
-      .sort((a, b) => (b.entryTime || '').localeCompare(a.entryTime || ''));
-    return todayRecords.slice(0, 10);
-  }, [allRecords, rules]);
+      }));
+
+    // Filter by slot if selected
+    if (selectedSlot) {
+      todayRecords = todayRecords.filter(r => isTimeInSlot(r.entryTime, selectedSlot));
+    }
+
+    // Filter by search query
+    if (searchTableQuery.trim()) {
+      const q = searchTableQuery.toLowerCase();
+      todayRecords = todayRecords.filter(r => 
+        r.studentName.toLowerCase().includes(q) ||
+        r.regNo.toLowerCase().includes(q) ||
+        r.department.toLowerCase().includes(q)
+      );
+    }
+
+    // Sort
+    todayRecords.sort((a, b) => {
+      let valA = a[sortField] || '';
+      let valB = b[sortField] || '';
+      if (sortField === 'status') {
+        valA = a.classification?.label || '';
+        valB = b.classification?.label || '';
+      }
+      return sortDirection === 'asc' 
+        ? String(valA).localeCompare(String(valB)) 
+        : String(valB).localeCompare(String(valA));
+    });
+
+    return todayRecords;
+  }, [allRecords, rules, selectedSlot, searchTableQuery, sortField, sortDirection]);
+
+  const handleSort = (field) => {
+    if (sortField === field) {
+      setSortDirection(prev => prev === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortField(field);
+      setSortDirection('asc');
+    }
+  };
 
   return (
     <div className="view-container">
-      {/* Page Header */}
+      {/* Header */}
       <div className="page-header">
         <div className="page-title-group">
           <h1>Good Morning, Administrator</h1>
@@ -101,6 +162,16 @@ export default function AdminDashboard({
           </button>
         </div>
       </div>
+
+      {/* Live Turnstile Simulation Bar */}
+      <LiveSimulationBar
+        isSimulating={isSimulating}
+        onToggleSimulation={onToggleSimulation}
+        onSimulateSingleTap={onSimulateSingleTap}
+        allStudents={allStudents}
+        allRecords={allRecords}
+        rules={rules}
+      />
 
       {/* KPI Cards Row (Section 3) */}
       <div className="kpi-grid">
@@ -188,6 +259,8 @@ export default function AdminDashboard({
         <ArrivalDistributionChart 
           distributionData={distributionData} 
           rules={rules} 
+          selectedSlot={selectedSlot}
+          onSelectSlot={setSelectedSlot}
         />
       </div>
 
@@ -310,46 +383,79 @@ export default function AdminDashboard({
 
       {/* Recent Activity: Today's Student Movement Stream (Section 4 & 21) */}
       <div className="card">
-        <div className="card-header">
+        <div className="card-header" style={{ flexWrap: 'wrap', gap: '12px' }}>
           <div>
             <h3 className="card-title">
               <Sparkles size={18} style={{ color: '#10b981' }} />
               Live Student Movement Stream (Today)
+              {selectedSlot && (
+                <span className="badge badge-teal" style={{ marginLeft: '10px' }}>
+                  Filtered: {selectedSlot}
+                </span>
+              )}
             </h3>
             <p className="card-subtitle">
               Real-time gate ingress and egress verification timestamps and classified movement status
             </p>
           </div>
 
-          <button 
-            className="btn btn-secondary btn-sm"
-            onClick={() => onNavigateToView('entry-exit')}
-          >
-            View All ({kpis.enteredToday} Entered) <ArrowRight size={13} />
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <div style={{ position: 'relative' }}>
+              <Search size={14} style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
+              <input
+                type="text"
+                placeholder="Search movements..."
+                className="filter-input"
+                style={{ paddingLeft: '30px', fontSize: '0.78rem', width: '180px' }}
+                value={searchTableQuery}
+                onChange={e => setSearchTableQuery(e.target.value)}
+              />
+            </div>
+
+            <button 
+              className="btn btn-secondary btn-sm"
+              onClick={() => onNavigateToView('entry-exit')}
+            >
+              Full Roster ({kpis.totalDayScholars}) <ArrowRight size={13} />
+            </button>
+          </div>
         </div>
 
         <div className="table-container">
           <table className="data-table">
             <thead>
               <tr>
-                <th>Register No</th>
-                <th>Student Name</th>
-                <th>Department</th>
+                <th onClick={() => handleSort('regNo')} style={{ cursor: 'pointer' }}>
+                  Register No <ArrowUpDown size={12} style={{ verticalAlign: 'middle' }} />
+                </th>
+                <th onClick={() => handleSort('studentName')} style={{ cursor: 'pointer' }}>
+                  Student Name <ArrowUpDown size={12} style={{ verticalAlign: 'middle' }} />
+                </th>
+                <th onClick={() => handleSort('department')} style={{ cursor: 'pointer' }}>
+                  Department <ArrowUpDown size={12} style={{ verticalAlign: 'middle' }} />
+                </th>
                 <th>Year</th>
-                <th>Morning Entry</th>
-                <th>Evening Exit</th>
+                <th onClick={() => handleSort('entryTime')} style={{ cursor: 'pointer' }}>
+                  Morning Entry <ArrowUpDown size={12} style={{ verticalAlign: 'middle' }} />
+                </th>
+                <th onClick={() => handleSort('exitTime')} style={{ cursor: 'pointer' }}>
+                  Evening Exit <ArrowUpDown size={12} style={{ verticalAlign: 'middle' }} />
+                </th>
                 <th>Source</th>
-                <th>Current Status</th>
+                <th onClick={() => handleSort('status')} style={{ cursor: 'pointer' }}>
+                  Current Status <ArrowUpDown size={12} style={{ verticalAlign: 'middle' }} />
+                </th>
                 <th>Action</th>
               </tr>
             </thead>
             <tbody>
-              {recentMovements.map(rec => {
+              {processedMovements.slice(0, 12).map(rec => {
+                const isJustSimulated = rec.studentId === lastSimulatedStudentId;
+
                 return (
                   <tr 
                     key={rec.id} 
-                    className="clickable-row" 
+                    className={`clickable-row ${isJustSimulated ? 'live-flash-row' : ''}`}
                     onClick={() => onOpenStudentProfile(rec.studentId)}
                   >
                     <td className="mono" style={{ fontWeight: 700, color: '#60a5fa' }}>

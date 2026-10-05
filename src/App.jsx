@@ -29,6 +29,7 @@ import {
   addAuditLog
 } from './data/storage';
 import { generateSystemAlerts, calculateTodayKPIs } from './services/analyticsEngine';
+import { playScanSuccess, playLateWarning } from './services/soundEffects';
 import './App.css';
 
 export default function App() {
@@ -54,14 +55,18 @@ export default function App() {
   const [isMissingExitsOpen, setIsMissingExitsOpen] = useState(false);
   const [toasts, setToasts] = useState([]);
 
+  // Live Turnstile Auto-Stream Simulation State
+  const [isSimulating, setIsSimulating] = useState(false);
+  const [lastSimulatedStudentId, setLastSimulatedStudentId] = useState(null);
+
   // Toast helper
-  const addToast = (text, type = 'success') => {
+  const addToast = useCallback((text, type = 'success') => {
     const id = Date.now();
     setToasts(prev => [...prev, { id, text, type }]);
     setTimeout(() => {
       setToasts(prev => prev.filter(t => t.id !== id));
-    }, 4000);
-  };
+    }, 3800);
+  }, []);
 
   // Keyboard shortcut Ctrl+K / Cmd+K for global search
   useEffect(() => {
@@ -86,7 +91,7 @@ export default function App() {
     saveStoredRules(newRules);
     addAuditLog('College Rules Modified', `Normal Entry: ${newRules.normalEntryTime}, Normal Exit: ${newRules.normalExitTime}`, 'Admin Dr. S. Ramanathan');
     addToast('College timing rules saved. Records reclassified.', 'success');
-  }, []);
+  }, [addToast]);
 
   // Today's KPIs & Alerts
   const todayKPIs = useMemo(() => {
@@ -97,8 +102,8 @@ export default function App() {
     return generateSystemAlerts(allStudents, allRecords, rules);
   }, [allStudents, allRecords, rules]);
 
-  // Record Entry (from Gate Staff or Admin)
-  const handleRecordEntry = (studentId, entryTime, source = 'RFID') => {
+  // Record Entry (from Gate Staff or Admin or Simulation)
+  const handleRecordEntry = useCallback((studentId, entryTime, source = 'RFID') => {
     const student = allStudents.find(s => s.id === studentId);
     if (!student) return;
 
@@ -135,13 +140,14 @@ export default function App() {
       updated = [newRecord, ...allRecords];
     }
 
+    setLastSimulatedStudentId(studentId);
     updateRecords(updated);
     addAuditLog('Morning Entry Recorded', `Student ${student.name} (${student.regNo}) at ${entryTime} AM via ${source}`);
-    addToast(`Entry recorded: ${student.name} (${entryTime} AM)`, 'success');
-  };
+    addToast(`⚡ Tap Verified: ${student.name} (${student.regNo}) at ${entryTime} AM`, 'success');
+  }, [allStudents, allRecords, rules, updateRecords, addToast]);
 
   // Record Exit (from Gate Staff or Admin)
-  const handleRecordExit = (studentId, exitTime, source = 'RFID', earlyReason = null) => {
+  const handleRecordExit = useCallback((studentId, exitTime, source = 'RFID', earlyReason = null) => {
     const student = allStudents.find(s => s.id === studentId);
     if (!student) return;
 
@@ -157,7 +163,6 @@ export default function App() {
         earlyExitReason: earlyReason
       };
     } else {
-      // Exit without morning entry (irregular)
       const newRecord = {
         id: `REC-${Date.now().toString().slice(-5)}`,
         studentId: student.id,
@@ -166,7 +171,7 @@ export default function App() {
         department: student.department,
         year: student.year,
         date: todayDate,
-        entryTime: '08:30', // defaulted
+        entryTime: '08:30',
         exitTime,
         entrySource: 'Manual',
         exitSource: source,
@@ -178,13 +183,77 @@ export default function App() {
       updated = [newRecord, ...allRecords];
     }
 
+    setLastSimulatedStudentId(studentId);
     updateRecords(updated);
     addAuditLog('Evening Exit Recorded', `Student ${student.name} (${student.regNo}) at ${exitTime} PM via ${source}`);
-    addToast(`Exit recorded: ${student.name} (${exitTime} PM)`, 'success');
-  };
+    addToast(`Departure Verified: ${student.name} at ${exitTime} PM`, 'success');
+  }, [allStudents, allRecords, rules, updateRecords, addToast]);
+
+  // Single Tap Simulation: Picks an unentered student or unexited student and performs a real-time turnstile tap
+  const handleSimulateSingleTap = useCallback(() => {
+    const todayDate = '2026-10-05';
+    const enteredStudentIds = allRecords
+      .filter(r => r.date === todayDate && Boolean(r.entryTime))
+      .map(r => r.studentId);
+
+    // Pick an absent/unentered student
+    const unentered = allStudents.filter(s => !enteredStudentIds.includes(s.id));
+
+    if (unentered.length > 0) {
+      const luckyStudent = unentered[Math.floor(Math.random() * unentered.length)];
+      // Generate a late arrival time e.g. 08:36 or 08:44
+      const mins = 8 * 60 + 31 + Math.floor(Math.random() * 20);
+      const h = String(Math.floor(mins / 60)).padStart(2, '0');
+      const m = String(mins % 60).padStart(2, '0');
+      const timeStr = `${h}:${m}`;
+
+      if (timeStr > rules.lateAfterTime) {
+        playLateWarning();
+      } else {
+        playScanSuccess();
+      }
+
+      handleRecordEntry(luckyStudent.id, timeStr, 'RFID');
+    } else {
+      // Pick a student without exit and simulate evening exit
+      const enteredWithoutExit = allRecords.filter(r => r.date === todayDate && r.entryTime && !r.exitTime);
+      if (enteredWithoutExit.length > 0) {
+        const rec = enteredWithoutExit[Math.floor(Math.random() * enteredWithoutExit.length)];
+        playScanSuccess();
+        handleRecordExit(rec.studentId, '17:18', 'RFID');
+      } else {
+        addToast('All scholars processed for today.', 'info');
+      }
+    }
+  }, [allStudents, allRecords, rules, handleRecordEntry, handleRecordExit, addToast]);
+
+  // Automated Ingress Simulation Interval (every 4.5 seconds when isSimulating is true)
+  useEffect(() => {
+    if (!isSimulating) return;
+
+    const timer = setInterval(() => {
+      handleSimulateSingleTap();
+    }, 4500);
+
+    return () => clearInterval(timer);
+  }, [isSimulating, handleSimulateSingleTap]);
+
+  // Add Disciplinary / Administrative Note to Student
+  const handleAddStudentNote = useCallback((studentId, noteText) => {
+    const todayDate = '2026-10-05';
+    const updated = allRecords.map(r => {
+      if (r.studentId === studentId && r.date === todayDate) {
+        return { ...r, adminNote: noteText };
+      }
+      return r;
+    });
+    updateRecords(updated);
+    addAuditLog('Admin Disciplinary Note Added', `Student ${studentId}: "${noteText}"`, 'Dr. S. Ramanathan');
+    addToast('Disciplinary remark recorded in student dossier.', 'success');
+  }, [allRecords, updateRecords, addToast]);
 
   // Resolve missing exit manually
-  const handleResolveMissingExit = (recordId, manualExitTime, reason) => {
+  const handleResolveMissingExit = useCallback((recordId, manualExitTime, reason) => {
     const updated = allRecords.map(r => {
       if (r.id === recordId) {
         return {
@@ -201,31 +270,32 @@ export default function App() {
     updateRecords(updated);
     addAuditLog('Missing Exit Corrected', `Record ${recordId} resolved with exit ${manualExitTime} PM: ${reason}`, 'Admin Dr. S. Ramanathan');
     addToast('Missing exit record successfully resolved and audited.', 'success');
-  };
+  }, [allRecords, updateRecords, addToast]);
 
   // Reset to default
-  const handleResetData = () => {
+  const handleResetData = useCallback(() => {
     if (window.confirm('Reset CampusFlow data to initial 105 students and 30-day simulated records?')) {
       const { students, records, rules: newRules } = resetAllDataToDefault();
       setAllStudents(students);
       setAllRecords(records);
       setRules(newRules);
+      setIsSimulating(false);
       addToast('Prototype data successfully re-initialized.', 'info');
     }
-  };
+  }, [addToast]);
 
   // Role switch handler
-  const handleRoleChange = (role) => {
+  const handleRoleChange = useCallback((role) => {
     setCurrentRole(role);
     if (role === 'admin') setCurrentView('dashboard');
-  };
+  }, []);
 
   // Switch student profile and transition to student role
-  const handleSwitchToStudentRole = (student) => {
+  const handleSwitchToStudentRole = useCallback((student) => {
     setSelectedStudent(student);
     setActiveProfileId(null);
     setCurrentRole('student');
-  };
+  }, []);
 
   return (
     <div className="app-container">
@@ -258,6 +328,7 @@ export default function App() {
           rules={rules}
           onClose={() => setActiveProfileId(null)}
           onSwitchToStudentRole={handleSwitchToStudentRole}
+          onAddStudentNote={handleAddStudentNote}
         />
       )}
 
@@ -335,6 +406,10 @@ export default function App() {
                 onOpenStudentProfile={setActiveProfileId}
                 onOpenMissingExits={() => setIsMissingExitsOpen(true)}
                 onNavigateToView={setCurrentView}
+                isSimulating={isSimulating}
+                onToggleSimulation={() => setIsSimulating(prev => !prev)}
+                onSimulateSingleTap={handleSimulateSingleTap}
+                lastSimulatedStudentId={lastSimulatedStudentId}
               />
             )}
 
